@@ -1,12 +1,11 @@
+import json
 import os
 import asyncio
 import logging
 from datetime import datetime, timedelta, date
 
 import aiosqlite
-from aiogram import Bot, Dispatcher, executor
-
-import schedule
+from aiogram import Bot, Dispatcher, executor, types as ttypes
 
 TOKEN = os.getenv('YANDEX_SPANISH_BOT_TOKEN')
 CHECK_PERIOD = 3600 * 24
@@ -31,38 +30,44 @@ async def echo(message):
     await message.answer(message.text)
 
 
-async def create_payment():
-    while True:
-        print('Call later')
-        # await asyncio.sleep(CHECK_PERIOD)
-        await asyncio.sleep(10)
+@dispatcher.message_handler(commands=['start'])
+async def start(message: ttypes.Message):
+    assert db_connection is not None, 'You should initialize DB connection first'
+    chat_id = message.chat.id
+    c = await db_connection.execute('SELECT chat_settings, chat_id FROM chats WHERE tg_chat_id=?', chat_id)
+    j = await c.fetchone()
+    if not j:
+        # https://docs.aiogram.dev/en/latest/examples/finite_state_machine_example.html
+        # Первый запуск, нужно сделать настройку
+        pass
+    else:
+        settings = json.loads(j[0][0])
+        loop = asyncio.get_event_loop()
+        loop.create_task(create_payment(settings['start_date'], j[0][1]))
+        loop.create_task(schedule(settings['daysofweek'], settings['period']))
 
 
-@dispatcher.message_handler(commands=['next_payment'])
-async def next_payment(message):
-    c = await db_connection.execute(f'SELECT payment_date FROM payments where payment_date > {date.today().strftime(DATE_FORMAT)} order by payment_date desc')
+async def schedule(days, period):
+    pass
+
+
+async def create_payment(date, chat_id):
+    assert db_connection is not None, 'You should initialize DB connection first'
+    await db_connection.execute('INSERT INTO payments (date, chat_id) VALUES (?, ?)', date, chat_id)
+
+
+@dispatcher.message_handler(regexp='(?:next|last)_payment')
+async def next_payment(message: ttypes.Message):
+    assert db_connection is not None, 'You should initialize DB connection first'
+    sign = '>' if message.get_command() == 'next_payment' else '<'
+    c = await db_connection.execute(
+        f'SELECT payment_date FROM payments where payment_date {sign} {date.today().strftime(DATE_FORMAT)} order by payment_date desc')
     r = await c.fetchone()
-    await message.answer(r)
+    answer = r[0] if r is not None else '404 not found'
+    await message.answer(answer)
 
 
 if __name__ == '__main__':
-    if schedule.START_DATE is not None:
-        start_date = datetime.strptime(schedule.START_DATE, schedule.DATE_FORMAT)
-        start_date += timedelta(hours=NOTIFICATION_OFFSET)
-    else:
-        # Находим ближайший к сегодняшнему день занятия
-        today = datetime.now().weekday()
-        min_offset = 7
-        for day in schedule.CLASS_DAYS:
-            offset = (day - today) % 7
-            if offset < min_offset:
-                min_offset = offset
-        start_date = datetime.today() + timedelta(days=min_offset)
-        start_date -= timedelta(hours=start_date.hour, minutes=start_date.minute, seconds=start_date.second)
-        start_date += timedelta(hours=NOTIFICATION_OFFSET)
-
     loop = asyncio.get_event_loop()
     loop.create_task(create_db_connection())
-    loop.call_later((datetime.now() - start_date).seconds,
-                    lambda loop_, task_: loop_.create_task(task_()), loop, create_payment)
     executor.start_polling(dispatcher, skip_updates=True, loop=loop)
